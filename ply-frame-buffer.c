@@ -813,6 +813,36 @@ ply_frame_buffer_fill_with_argb32_data(ply_frame_buffer_t      *buffer,
   return ply_frame_buffer_flush (buffer);
 }
   
+bool
+ply_frame_buffer_fill_with_argb32_data_sprite(ply_frame_buffer_t      *buffer,
+                                              ply_frame_buffer_area_t *area,
+                                              uint32_t                *data,
+                                              int                      sprite_num)
+{
+  long row, column;
+  unsigned long off_x, off_y;
+
+  assert (buffer != NULL);
+  assert (ply_frame_buffer_device_is_open (buffer));
+
+  if (area == NULL)
+    area = &buffer->area;
+
+  off_x = area->x;
+  off_y = area->y;
+
+  for (row = 0; row < area->height; row++) {
+    for (column = 0; column < area->width; column++) {
+      buffer->shadow_buffer[(off_x + column) + (off_y + row ) * buffer->area.width] = \
+          data[(sprite_num * area->width * area->height) + column + row * area->width];
+    }
+  }
+
+  ply_frame_buffer_add_area_to_flush_area (buffer, area);
+
+  return ply_frame_buffer_flush (buffer);
+}
+
 const char *
 ply_frame_buffer_get_bytes (ply_frame_buffer_t *buffer)
 {

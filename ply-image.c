@@ -24,6 +24,7 @@
  *             Kristian Høgsberg <krh@redhat.com>
  *             Ray Strode <rstrode@redhat.com>
  *             Carl D. Worth <cworth@cworth.org>
+ *             Peter Vicman <peter.vicman@gmail.com>
  */
 
 #include <assert.h>
@@ -70,9 +71,161 @@ typedef struct _ply_image
   long height;
 } ply_image_t;
 
+typedef struct _ply_animate_config
+{
+  char *filename;
+  unsigned char position_x;
+  unsigned char position_y;
+  unsigned long delay;
+  bool daemonize;
+  bool finished;
+} _ply_animate_config_t;
 
+static _ply_animate_config_t animate_config;
+
+static void ply_handle_alarm (int sig);
+static void ply_parse_config (char *config_file);
+static void ply_daemonize ();
 static bool ply_image_open_file (ply_image_t *image);
 static void ply_image_close_file (ply_image_t *image);
+
+static void
+ply_handle_alarm (int sig) {
+  animate_config.finished = true;
+}
+
+static void
+ply_parse_config (char *config_file) {
+  char *s;
+  char *s2;
+  char *p_name;
+  char *p_value;
+  char buff[256];
+  FILE *fp;
+
+  animate_config.filename = NULL;
+  animate_config.position_x = 50;
+  animate_config.position_y = 50;
+  animate_config.delay = 250 * 1000;
+  animate_config.daemonize = false;
+  animate_config.finished = false;
+
+  fp = fopen(config_file, "r");
+  if (fp == NULL)
+    return;
+
+  while ((s = fgets (buff, sizeof buff, fp)) != NULL) {
+    /* skip blank lines and comments */
+    if (buff[0] == '\r' || buff[0] == '\n' || buff[0] == ' ' || buff[0] == '#')
+      continue;
+
+    s = strtok (buff, "=");
+    if (s == NULL)
+      continue;
+    else
+      p_name = s;
+
+    s = strtok (NULL, "=");
+    if (s == NULL)
+      continue;
+    else
+      p_value = s;
+
+    s2 = &p_value[strlen(p_value) - 1];
+
+    /* trim right */
+    while ((*s2 == '\r' || *s2 == '\n' || isspace(*s2)) && (s2 >= p_value))
+      s2--;
+
+    s2[1] = '\0';
+
+    if (strcmp(p_name, "sprite_file") == 0) {
+      animate_config.filename = strdup(p_value);
+    } else if (strcmp(p_name, "position_x") == 0) {
+      animate_config.position_x = atoi(p_value);
+      if (animate_config.position_x >= 100)
+        animate_config.position_x = 50;
+    } else if (strcmp(p_name, "position_y") == 0) {
+      animate_config.position_y = atoi(p_value);
+      if (animate_config.position_y >= 100)
+        animate_config.position_y = 50;
+    } else if (strcmp(p_name, "delay") == 0) {
+      animate_config.delay = atoi(p_value);
+      if (animate_config.delay > 5000)
+        animate_config.delay = 250;
+
+      animate_config.delay *= 1000;
+    } else if (strcmp(p_name, "daemonize") == 0) {
+      if (strcmp(p_value, "yes") == 0)
+        animate_config.daemonize = true;
+      else
+        animate_config.daemonize = false;
+    }
+  }
+
+  fclose (fp);
+}
+
+static void ply_daemonize () {
+  int exit_code;
+  pid_t pid;
+
+  pid = fork();
+  if (pid == -1) {
+    exit_code = errno;
+    perror ("failed to fork while daemonizing first time");
+    exit (exit_code);
+  } else if (pid != 0) {
+    exit(0);
+  }
+
+  umask(0);
+
+  if (setsid() == -1) {
+    exit_code = errno;
+    perror ("can not create new session while daemonizing");
+    exit (exit_code);
+  }
+
+  /* signal(SIGHUP,SIG_IGN); */
+  pid=fork();
+  if (pid == -1) {
+    exit_code = errno;
+    perror ("failed to fork while daemonizing second time");
+    exit (exit_code);
+  } else if (pid != 0) {
+    exit(0);
+  }
+
+  if (chdir("/") == -1) {
+    exit_code = errno;
+    perror ("failed to change working directory while daemonizing");
+    exit (exit_code);
+  }
+
+  umask(0);
+  close(STDIN_FILENO);
+  close(STDOUT_FILENO);
+  close(STDERR_FILENO);
+
+  if (open("/dev/null", O_RDONLY) == -1) {
+    exit_code = errno;
+    perror ("failed to reopen stdin while daemonizing");
+    exit (exit_code);
+  }
+
+  if (open("/dev/null", O_WRONLY) == -1) {
+    exit_code = errno;
+    perror ("failed to reopen stdout while daemonizing");
+    exit (exit_code);
+  }
+
+  if (open("/dev/null", O_RDWR) == -1) {
+    exit_code = errno;
+    perror ("failed to reopen stderr while daemonizing");
+    exit (exit_code);
+  }
+}
 
 static bool
 ply_image_open_file (ply_image_t *image)
@@ -406,8 +559,8 @@ hide_cursor (void)
 }
 
 static void
-animate_at_time (ply_frame_buffer_t *buffer,
-                 ply_image_t        *image)
+show_image (ply_frame_buffer_t *buffer,
+            ply_image_t        *image)
 {
   ply_frame_buffer_area_t area;
   uint32_t *data;
@@ -430,12 +583,41 @@ animate_at_time (ply_frame_buffer_t *buffer,
 
 }
 
+static void
+animate_sprite (ply_frame_buffer_t *buffer,
+                ply_image_t        *sprites,
+                int                 sprite_num)
+{
+  ply_frame_buffer_area_t area;
+  uint32_t *data;
+  long sprite_width, sprite_height;
+
+  data = ply_image_get_data (sprites);
+  sprite_width = ply_image_get_width (sprites);
+  sprite_height = sprite_width;   /* square sprite */
+
+  ply_frame_buffer_get_size (buffer, &area);
+  /* set x/y position for sprite */
+  area.x = area.width * animate_config.position_x / 100;
+  area.y = area.height * animate_config.position_y / 100;
+  /* change visible part to just a sprite*/
+  area.width = sprite_width;
+  area.height = sprite_height;
+
+  ply_frame_buffer_pause_updates (buffer);
+  ply_frame_buffer_fill_with_argb32_data_sprite(buffer, &area, data, sprite_num);
+  ply_frame_buffer_unpause_updates (buffer);
+}
+
 int
 main (int    argc,
       char **argv)
 {
   ply_image_t *image;
+  ply_image_t *sprites;
   ply_frame_buffer_t *buffer;
+  int sprite_num;
+  int sprite_num_max;
   int exit_code;
 
   exit_code = 0;
@@ -467,7 +649,42 @@ main (int    argc,
 
   image = ply_image_resize(image, buffer->area.width, buffer->area.height);
 
-  animate_at_time (buffer, image);
+  show_image (buffer, image);
+
+  if (argc == 3) {
+    signal(SIGUSR1, ply_handle_alarm);
+
+    if (animate_config.daemonize == true)
+      ply_daemonize();
+
+    ply_parse_config(argv[2]);
+
+    sprites = ply_image_new (animate_config.filename);
+
+    if (!ply_image_load (sprites)) {
+      exit_code = errno;
+      perror ("could not load sprites");
+      return exit_code;
+    }
+
+    /* square sprite */
+    sprite_num_max = ply_image_get_height (sprites) / ply_image_get_width (sprites);
+
+    for (sprite_num = 0; animate_config.finished == false; ) {
+      animate_sprite (buffer, sprites, sprite_num);
+
+      sprite_num++;
+      if (sprite_num >= sprite_num_max)
+        sprite_num = 0;
+
+      usleep(animate_config.delay);
+    }
+
+    ply_image_free (sprites);
+    free(animate_config.filename);
+
+    show_image (buffer, image); /* remove sprite */
+  }
 
   ply_frame_buffer_close (buffer);
   ply_frame_buffer_free (buffer);

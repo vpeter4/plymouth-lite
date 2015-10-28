@@ -74,6 +74,7 @@ typedef struct _ply_image
 typedef struct _ply_animate_config
 {
   char *filename;
+  unsigned int sprites_num;
   unsigned char position_x;
   unsigned char position_y;
   unsigned long delay;
@@ -104,6 +105,7 @@ ply_parse_config (char *config_file) {
   FILE *fp;
 
   animate_config.filename = NULL;
+  animate_config.sprites_num = 0;
   animate_config.position_x = 50;
   animate_config.position_y = 50;
   animate_config.delay = 250 * 1000;
@@ -141,6 +143,10 @@ ply_parse_config (char *config_file) {
 
     if (strcmp(p_name, "sprite_file") == 0) {
       animate_config.filename = strdup(p_value);
+    } else if (strcmp(p_name, "sprites_num") == 0) {
+      animate_config.sprites_num = atoi(p_value);
+      if (animate_config.sprites_num >= 100000)
+        animate_config.sprites_num = 10;
     } else if (strcmp(p_name, "position_x") == 0) {
       animate_config.position_x = atoi(p_value);
       if (animate_config.position_x >= 100)
@@ -593,8 +599,13 @@ animate_sprite (ply_frame_buffer_t *buffer,
   long sprite_width, sprite_height;
 
   data = ply_image_get_data (sprites);
+  
   sprite_width = ply_image_get_width (sprites);
-  sprite_height = sprite_width;   /* square sprite */
+  if (animate_config.sprites_num == 0) {
+  	sprite_height = sprite_width;   /* square sprite */
+  } else {
+  	sprite_height = ply_image_get_height (sprites) / animate_config.sprites_num;
+  }
 
   ply_frame_buffer_get_size (buffer, &area);
   /* set x/y position for sprite */
@@ -652,12 +663,12 @@ main (int    argc,
   show_image (buffer, image);
 
   if (argc == 3) {
+    ply_parse_config(argv[2]);
+
     signal(SIGUSR1, ply_handle_alarm);
 
     if (animate_config.daemonize == true)
       ply_daemonize();
-
-    ply_parse_config(argv[2]);
 
     sprites = ply_image_new (animate_config.filename);
 
@@ -666,9 +677,12 @@ main (int    argc,
       perror ("could not load sprites");
       return exit_code;
     }
-
-    /* square sprite */
-    sprite_num_max = ply_image_get_height (sprites) / ply_image_get_width (sprites);
+    
+    if (animate_config.sprites_num == 0) {
+    	/* assume square sprite */
+    	sprite_num_max = ply_image_get_height (sprites) / ply_image_get_width (sprites);
+    } else
+    	sprite_num_max = animate_config.sprites_num;
 
     for (sprite_num = 0; animate_config.finished == false; ) {
       animate_sprite (buffer, sprites, sprite_num);

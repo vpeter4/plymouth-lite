@@ -40,6 +40,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <math.h>
+#include <ctype.h>
+#include <signal.h>
 
 #include <png.h>
 
@@ -538,7 +540,6 @@ ply_image_rotate (ply_image_t *image,
 #include "ply-frame-buffer.h"
 
 #include <math.h>
-#include <signal.h>
 #include <stdio.h>
 #include <sys/ioctl.h>
 #include <sys/time.h>
@@ -590,34 +591,52 @@ show_image (ply_frame_buffer_t *buffer,
 }
 
 static void
-animate_sprite (ply_frame_buffer_t *buffer,
-                ply_image_t        *sprites,
-                int                 sprite_num)
+animate_sprite (ply_frame_buffer_t      *buffer,
+                ply_frame_buffer_area_t *area,
+                ply_image_t             *sprites,
+                int                      sprite_num)
 {
-  ply_frame_buffer_area_t area;
   uint32_t *data;
-  long sprite_width, sprite_height;
 
   data = ply_image_get_data (sprites);
-  
-  sprite_width = ply_image_get_width (sprites);
-  if (animate_config.sprites_num == 0) {
-  	sprite_height = sprite_width;   /* square sprite */
-  } else {
-  	sprite_height = ply_image_get_height (sprites) / animate_config.sprites_num;
-  }
-
-  ply_frame_buffer_get_size (buffer, &area);
-  /* set x/y position for sprite */
-  area.x = area.width * animate_config.position_x / 100;
-  area.y = area.height * animate_config.position_y / 100;
-  /* change visible part to just a sprite*/
-  area.width = sprite_width;
-  area.height = sprite_height;
 
   ply_frame_buffer_pause_updates (buffer);
-  ply_frame_buffer_fill_with_argb32_data_sprite(buffer, &area, data, sprite_num);
+  ply_frame_buffer_fill_with_argb32_data_sprite(buffer, area, data, sprite_num);
   ply_frame_buffer_unpause_updates (buffer);
+}
+
+static void
+ply_make_transparent_sprites(ply_frame_buffer_t      *buffer,
+                             ply_frame_buffer_area_t *area,
+                             ply_image_t             *sprites,
+                             int                      sprite_num)
+{
+  long row, column;
+  unsigned long off_x, off_y;
+  unsigned long data_pixel_pos;
+  uint32_t *data;
+
+  assert (buffer != NULL);
+  assert (ply_frame_buffer_device_is_open (buffer));
+
+  if (area == NULL)
+    area = &buffer->area;
+
+  data = ply_image_get_data (sprites);
+
+  off_x = area->x;
+  off_y = area->y;
+
+  for (row = 0; row < area->height; row++) {
+    for (column = 0; column < area->width; column++) {
+
+      /* copy pixel from background in case of transparent color */
+      data_pixel_pos = (sprite_num * area->width * area->height) + column + row * area->width;
+      if (data[data_pixel_pos] == 0) {
+        data[data_pixel_pos] = buffer->shadow_buffer[(off_x + column) + (off_y + row ) * buffer->area.width];
+      }
+    }
+  }
 }
 
 int
@@ -629,6 +648,8 @@ main (int    argc,
   ply_frame_buffer_t *buffer;
   int sprite_num;
   int sprite_num_max;
+  ply_frame_buffer_area_t area;
+  long sprite_width, sprite_height;
   int exit_code;
 
   exit_code = 0;
@@ -677,15 +698,33 @@ main (int    argc,
       perror ("could not load sprites");
       return exit_code;
     }
-    
+
     if (animate_config.sprites_num == 0) {
-    	/* assume square sprite */
-    	sprite_num_max = ply_image_get_height (sprites) / ply_image_get_width (sprites);
+      /* assume square sprite */
+      sprite_num_max = ply_image_get_height (sprites) / ply_image_get_width (sprites);
     } else
-    	sprite_num_max = animate_config.sprites_num;
+      sprite_num_max = animate_config.sprites_num;
+
+    sprite_width = ply_image_get_width (sprites);
+    if (animate_config.sprites_num == 0) {
+      sprite_height = sprite_width;   /* square sprite */
+    } else {
+      sprite_height = ply_image_get_height (sprites) / animate_config.sprites_num;
+    }
+
+    ply_frame_buffer_get_size (buffer, &area);
+    /* set x/y position for sprite */
+    area.x = area.width * animate_config.position_x / 100;
+    area.y = area.height * animate_config.position_y / 100;
+    /* change visible part to just a sprite*/
+    area.width = sprite_width;
+    area.height = sprite_height;
+
+    for (sprite_num = 0; sprite_num < sprite_num_max; sprite_num++)
+      ply_make_transparent_sprites (buffer, &area, sprites, sprite_num);
 
     for (sprite_num = 0; animate_config.finished == false; ) {
-      animate_sprite (buffer, sprites, sprite_num);
+      animate_sprite (buffer, &area, sprites, sprite_num);
 
       sprite_num++;
       if (sprite_num >= sprite_num_max)
